@@ -1,0 +1,93 @@
+<?php
+/**
+ * Devuelve en JSON los focos de calor de la tabla `firms`.
+ *
+ * GET (ambos opcionales):
+ *   fecha_desde=YYYY-MM-DD
+ *   fecha_hasta=YYYY-MM-DD
+ *
+ * Si llega solo una, filtra desde/hasta esa fecha. Si no llega ninguna, no filtra.
+ */
+header('Content-Type: application/json; charset=utf-8');
+
+// ---------- Configuración de la base de datos ----------
+const DB_HOST = 'localhost';
+const DB_NAME = 'flame';
+const DB_USER = 'root';
+const DB_PASS = '12345678';
+const MAX_FILAS = 50000; // tope de seguridad
+
+function responder(int $codigo, array $data): void {
+    http_response_code($codigo);
+    echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION);
+    exit;
+}
+
+// ---------- Validación de parámetros ----------
+$desde = trim($_GET['fecha_desde'] ?? '');
+$hasta = trim($_GET['fecha_hasta'] ?? '');
+
+$fechaValida = function (string $f): bool {
+    $d = DateTime::createFromFormat('Y-m-d', $f);
+    return $d && $d->format('Y-m-d') === $f;
+};
+
+if ($desde !== '' && !$fechaValida($desde)) responder(400, ['error' => 'fecha_desde invalida (use YYYY-MM-DD)']);
+if ($hasta !== '' && !$fechaValida($hasta)) responder(400, ['error' => 'fecha_hasta invalida (use YYYY-MM-DD)']);
+if ($desde !== '' && $hasta !== '' && $desde > $hasta) responder(400, ['error' => 'fecha_desde no puede ser mayor que fecha_hasta']);
+
+// ---------- Consulta ----------
+try {
+    $pdo = new PDO(
+        'mysql:host=' . DB_HOST . ';dbname=' . DB_NAME . ';charset=utf8mb4',
+        DB_USER,
+        DB_PASS,
+        [
+            PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+        ]
+    );
+
+    $sql = 'SELECT latitude, longitude, brightness, acq_date, acq_time,
+                   satellite, instrument, confidence, bright_t31, frp,
+                   bright_ti4, bright_ti5
+            FROM firms';
+    $where  = [];
+    $params = [];
+
+    // acq_date es TEXT en formato YYYY-MM-DD, por lo que la comparación de strings es válida
+    if ($desde !== '') { $where[] = 'acq_date >= :desde'; $params[':desde'] = $desde; }
+    if ($hasta !== '') { $where[] = 'acq_date <= :hasta'; $params[':hasta'] = $hasta; }
+
+    if ($where) $sql .= ' WHERE ' . implode(' AND ', $where);
+    $sql .= ' ORDER BY acq_date, acq_time LIMIT ' . MAX_FILAS;
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $alert = "RED";
+
+    $datos = [];
+    foreach ($stmt as $r) {
+        $datos[] = [
+            'latitud'    => $r['latitude']   !== null ? (float)$r['latitude']   : null,
+            'longitud'   => $r['longitude']  !== null ? (float)$r['longitude']  : null,
+            'brightness' => $r['brightness'] !== null ? (float)$r['brightness'] : null,
+            'acq_date'   => $r['acq_date'],
+            'acq_time'   => $r['acq_time']   !== null ? (int)$r['acq_time']     : null,
+            'satellite'  => $r['satellite'],
+            'instrument' => $r['instrument'],
+            'confidence' => $r['confidence'] !== null ? (int)$r['confidence']   : null,
+            'bright_t31' => $r['bright_t31'] !== null ? (float)$r['bright_t31'] : null,
+            'frp'        => $r['frp']        !== null ? (float)$r['frp']        : null,
+            'bright_ti4' => $r['bright_ti4'], // TEXT en la tabla
+            'bright_ti5' => $r['bright_ti5'], // TEXT en la tabla
+            'alert_level' => $alert,
+        ];
+    }
+
+    responder(200, $datos);
+
+} catch (PDOException $e) {
+    error_log('fuego.php: ' . $e->getMessage());
+    responder(500, ['error' => 'Error al consultar la base de datos']);
+}
